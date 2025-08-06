@@ -1,13 +1,22 @@
 # gui/interface.py
+import os
 import tkinter as tk
 from tkinter import scrolledtext
 from chat.ollama_client import get_reply
 from chat.emotion_infer import infer_emotion_llm  # ← 加這行
 
+try:
+    from PIL import Image, ImageTk
+except ImportError:  # pragma: no cover - pillow is an optional dependency
+    Image = ImageTk = None
+
 class ChatGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Chino - AI聊天機器人")
+
+        # 嘗試載入背景圖片（background.png 或 background.jpg）
+        self._load_background()
 
         # 情緒狀態標籤（新增）
         self.emotion_label = tk.Label(root, text="目前偵測情緒：😶 中立", font=("Arial", 12), fg="blue")
@@ -45,3 +54,16 @@ class ChatGUI:
         self.chat_box.insert(tk.END, f"Chino：{reply.strip()}\n\n")
         self.chat_box.config(state=tk.DISABLED)
         self.chat_box.see(tk.END)
+
+    def _load_background(self):
+        """Load background image if available."""
+        if Image is None:
+            return
+        for ext in ("png", "jpg", "jpeg"):
+            path = os.path.join(os.getcwd(), f"background.{ext}")
+            if os.path.exists(path):
+                image = Image.open(path)
+                self._bg_image = ImageTk.PhotoImage(image)
+                label = tk.Label(self.root, image=self._bg_image)
+                label.place(relwidth=1, relheight=1)
+                break
