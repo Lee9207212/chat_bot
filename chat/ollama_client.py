@@ -1,9 +1,10 @@
 import requests
 from .emotion_infer import infer_emotion_llm
 from .memory import ChatMemory
+import os 
 
-MODEL = "qwen2.5:7b"
-OLLAMA_API = "http://localhost:11434/api/generate"
+MODEL = "llama3:8b"
+OLLAMA_API = os.environ.get("OLLAMA_API")
 
 # ✨ 可自行修改這段系統提示
 memory = ChatMemory()
