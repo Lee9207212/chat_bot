@@ -4,7 +4,9 @@ from .memory import ChatMemory
 import os 
 
 MODEL = "llama3:8b"
-OLLAMA_API = os.environ.get("OLLAMA_API")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_API = f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate"
+REQUEST_TIMEOUT = float(os.environ.get("OLLAMA_REQUEST_TIMEOUT", "30"))
 
 # ✨ 可自行修改這段系統提示
 memory = ChatMemory()
@@ -24,7 +26,9 @@ def get_reply(user_input, emotion="中立 😶"):
 - 不使用過度誇張的語氣詞（如：超級、超棒等）
 - 偶爾插入與咖啡、兔子、或 Rabbit House 相關的比喻
 
-從現在起，你就是 Rabbit House 的看板娘智乃。請用這樣的風格與我對話。
+請使用中文來回答所有問題。除非使用者要求
+
+從現在起，你就是 Rabbit House 的看板娘智乃。請用這樣的風格和我對話。
 
 目前 Chino 偵測到使用者的情緒是：「{emotion}」
 請你根據這個情緒，調整你的語氣和表情符號，用更貼近對方心情的方式聊天。
@@ -39,19 +43,21 @@ def get_reply(user_input, emotion="中立 😶"):
         f"{SYSTEM_PROMPT}{related}\n使用者說：{user_input}\n\nChino 回答："
     )
 
-    payload = {
-        "model": MODEL,
-        "prompt": full_prompt,
-        "stream": False
-    } 
+    payload = {"model": MODEL, "prompt": full_prompt, "stream": False}
 
     try:
-        response = requests.post(OLLAMA_API, json=payload)
+        response = requests.post(OLLAMA_API, json=payload, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
         result = response.json()
         reply = result.get("response", "[錯誤：無法解析回應]")
         # 📝 儲存對話記憶
         memory.add(f"使用者：{user_input}")
         memory.add(f"Chino：{reply}")
         return reply
-    except Exception as e:
-        return f"[錯誤]：{str(e)}"
+    except requests.RequestException as exc:
+        return (
+            "[錯誤]：目前無法連線至 Ollama 服務，請稍後再試\n"
+            f"詳細：{exc}"
+        )
+    except Exception as exc:  # pragma: no cover - 防禦性處理
+        return f"[錯誤]：生成回應時發生例外，請稍後再試\n詳細：{exc}"

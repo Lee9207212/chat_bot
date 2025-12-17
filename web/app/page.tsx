@@ -7,7 +7,8 @@ import styles from "./page.module.css";
 
 export default function HomePage() {
   const { messages, input, handleInputChange, handleSubmit, isLoading, error } = useChat({
-    api: "/api/chat"
+    api: "/api/chat",
+    streamProtocol: "text",
   });
 
   const renderedMessages = useMemo(

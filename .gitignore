@@ -6,3 +6,5 @@ web/.next/
 web/node_modules/
 web/package-lock.json
 .env
+.env.local
+.env.*.local

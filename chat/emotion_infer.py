@@ -1,12 +1,20 @@
-from litellm import completion
+import os
+from typing import Final
 
-# 使用 LiteLLM 的模型格式，建議中文模型如 qwen2.5:7b
-MODEL = "ollama/qwen2.5:7b"
-BASE_URL = "http://localhost:11434"
+import requests
+
+# 使用 Ollama 來判斷情緒，預設走本機端點，必要時可透過環境變數覆蓋
+EMOTION_MODEL: Final[str] = os.environ.get("OLLAMA_EMOTION_MODEL", "qwen2.5:7b")
+OLLAMA_BASE_URL: Final[str] = os.environ.get(
+    "OLLAMA_BASE_URL", "http://localhost:11434"
+)
+OLLAMA_GENERATE_URL: Final[str] = f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate"
 
 def infer_emotion_llm(user_input: str) -> str:
     """
-    使用 LLM 推論情緒，只回傳單一情緒類別
+    使用 LLM 推論情緒，只回傳單一情緒類別。
+
+    改用直接呼叫 Ollama，避免 LiteLLM 連線錯誤影響前端體驗。
     """
     prompt = f"""
 請判斷下列句子的情緒，只回傳單一情緒類別（不要多餘描述）：
@@ -17,14 +25,14 @@ def infer_emotion_llm(user_input: str) -> str:
 句子：「{user_input}」
 回答：
 """.strip()
+    payload = {"model": EMOTION_MODEL, "prompt": prompt, "stream": False}
 
     try:
-        response = completion(
-            model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            base_url=BASE_URL,
-        )
-        result = response["choices"][0]["message"]["content"].strip()
+        response = requests.post(OLLAMA_GENERATE_URL, json=payload, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        result = data.get("response", "").strip()
+        
         return result if result else "中立 😶"
     except Exception:
         return "中立 😶"
