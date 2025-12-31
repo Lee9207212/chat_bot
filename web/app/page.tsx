@@ -6,10 +6,12 @@ import { useChat } from "ai/react";
 import styles from "./page.module.css";
 
 export default function HomePage() {
-  const { messages, input, handleInputChange, handleSubmit, isLoading, error } = useChat({
-    api: "/api/chat",
-    streamProtocol: "text",
-  });
+  const { messages, input, handleInputChange, handleSubmit, isLoading, error } = useChat(
+    {
+      api: "/api/chat",
+      streamProtocol: "text",
+    }
+  );
 
   const renderedMessages = useMemo(
     () =>
@@ -22,6 +24,10 @@ export default function HomePage() {
     [messages]
   );
 
+  const fallbackMessage = error
+    ? "抱歉，目前無法取得回應，請確認後端伺服器（FastAPI/Ollama）是否已啟動。"
+    : null;
+
   return (
     <main className={styles.container}>
       <section className={styles.chatWindow}>
@@ -30,7 +36,15 @@ export default function HomePage() {
           <p>透過 Vercel AI 建立的網頁聊天視窗</p>
         </header>
 
-        <div className={styles.messages}>{renderedMessages}</div>
+        <div className={styles.messages}>
+          {renderedMessages}
+          {fallbackMessage ? (
+            <div className={styles.message} data-role="assistant">
+              <div className={styles.avatar}>智乃</div>
+              <div className={styles.bubble}>{fallbackMessage}</div>
+            </div>
+          ) : null}
+        </div>
 
         <form className={styles.form} onSubmit={handleSubmit}>
           <input

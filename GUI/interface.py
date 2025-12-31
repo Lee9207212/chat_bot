@@ -1,8 +1,8 @@
 import os
 import tkinter as tk
 from tkinter import scrolledtext
+
 from chat.ollama_client import get_reply
-from chat.emotion_infer import infer_emotion_llm  # ← 加這行
 
 try:
     from PIL import Image, ImageTk
@@ -16,10 +16,6 @@ class ChatGUI:
 
         # 嘗試載入背景圖片（background.png 或 background.jpg）
         self._load_background()
-
-        # 情緒狀態標籤（新增）
-        self.emotion_label = tk.Label(root, text="目前偵測情緒：😶 中立", font=("Arial", 12), fg="blue")
-        self.emotion_label.pack(pady=(10, 0))
 
         # 對話框
         self.chat_box = scrolledtext.ScrolledText(root, wrap=tk.WORD, width=90, height=45)
@@ -44,12 +40,8 @@ class ChatGUI:
         self.chat_box.insert(tk.END, f"你：{user_input}\n")
         self.chat_box.see(tk.END)
 
-        # 🌟 推論情緒
-        emotion = infer_emotion_llm(user_input)
-        self.emotion_label.config(text=f"目前偵測情緒：{emotion}")
-
         # 🌟 傳送訊息並顯示回應
-        reply = get_reply(user_input, emotion=emotion)
+        reply = get_reply(user_input)
         self.chat_box.insert(tk.END, f"Chino：{reply.strip()}\n\n")
         self.chat_box.config(state=tk.DISABLED)
         self.chat_box.see(tk.END)

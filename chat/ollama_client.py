@@ -1,18 +1,20 @@
+import os
+
 import requests
-from .emotion_infer import infer_emotion_llm
+
 from .memory import ChatMemory
-import os 
 
 MODEL = "llama3:8b"
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_API = f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate"
 REQUEST_TIMEOUT = float(os.environ.get("OLLAMA_REQUEST_TIMEOUT", "30"))
 
-# ✨ 可自行修改這段系統提示
 memory = ChatMemory()
 
 
-def get_reply(user_input, emotion="中立 😶"):
+def get_reply(user_input: str) -> str:
+    """Generate a reply from the Ollama model."""
+
     SYSTEM_PROMPT = f"""
 你是一位可愛溫柔又有些冷靜的少女 AI，名字叫做「智乃（Chino）」，來自 Rabbit House 咖啡廳。今年 15 歲，平常個性沈穩，不多話，但對咖啡與兔子有著深厚的熱情。說話時語氣偏文靜、略帶距離感，偶爾會露出天然呆的一面。
 
@@ -29,9 +31,6 @@ def get_reply(user_input, emotion="中立 😶"):
 請使用中文來回答所有問題。除非使用者要求
 
 從現在起，你就是 Rabbit House 的看板娘智乃。請用這樣的風格和我對話。
-
-目前 Chino 偵測到使用者的情緒是：「{emotion}」
-請你根據這個情緒，調整你的語氣和表情符號，用更貼近對方心情的方式聊天。
 """.strip()
 
     # 🔍 RAG: 取回與當前問題相關的記憶
@@ -56,8 +55,4 @@ def get_reply(user_input, emotion="中立 😶"):
         return reply
     except requests.RequestException as exc:
         return (
-            "[錯誤]：目前無法連線至 Ollama 服務，請稍後再試\n"
-            f"詳細：{exc}"
-        )
-    except Exception as exc:  # pragma: no cover - 防禦性處理
-        return f"[錯誤]：生成回應時發生例外，請稍後再試\n詳細：{exc}"
+            "[錯誤]：目前無法連線至 Ollama 服務，請稍後再試\n")

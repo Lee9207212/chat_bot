@@ -5,7 +5,7 @@
 ## 開發環境準備
 
 1. 建立並啟動 Python 虛擬環境，安裝需求套件：
-   ```bash
+  ```bash
    python3 -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
@@ -30,9 +30,9 @@
 ## 專案結構
 
 - `backend/server.py`：FastAPI 伺服器與 `/api/chat` 端點。
-- `chat/`：聊天邏輯、情緒判斷與記憶模組。
+- `chat/`：聊天邏輯與記憶模組。
 - `web/`：Next.js 前端，使用 `ai/react` 的 `useChat` 建立對話介面。
 
 ## 測試對話
 
-啟動上述服務後即可在瀏覽器中輸入訊息，前端會呼叫 Python 後端，再由後端與 Ollama 模型互動並回傳回覆與情緒標籤。
+啟動上述服務後即可在瀏覽器中輸入訊息，前端會呼叫 Python 後端，再由後端與 Ollama 模型互動並回傳回覆

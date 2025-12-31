@@ -74,6 +74,13 @@
   background: #fef3c7;
 }
 
+.meta {
+  display: block;
+  margin-top: 6px;
+  color: #6b7280;
+  font-size: 0.9rem;
+}
+
 .form {
   display: flex;
   gap: 12px;
