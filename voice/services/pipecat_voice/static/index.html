@@ -1,0 +1,968 @@
+﻿<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pipecat Dual Channel Demo</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; max-width: 960px; }
+    #log { border: 1px solid #ccc; padding: 12px; min-height: 320px; max-height: 60vh; overflow-y: auto; white-space: pre-wrap; }
+    .row { margin-top: 12px; display: flex; gap: 8px; }
+    input[type="text"] { flex: 1; padding: 8px; }
+    button { padding: 8px 12px; }
+    .meta { color: #555; font-size: 12px; margin-top: 8px; }
+    .err { color: #b00020; }
+    .assistant-line { color: #0b3a6f; }
+    .status { margin-top: 10px; font-size: 12px; }
+    .status span { margin-right: 12px; }
+    .stt-row { align-items: center; }
+    .switch-wrap { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; }
+    .switch-wrap input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; }
+    .stt-toggle-text { font-weight: 700; padding: 3px 8px; border-radius: 999px; border: 1px solid #bbb; }
+    .stt-on { color: #0b6b3a; background: #eaf8f0; border-color: #8fceaa; }
+    .stt-off { color: #8b1e1e; background: #fdeeee; border-color: #e7aaaa; }
+  </style>
+</head>
+<body>
+  <h1>Pipecat Dual Channel (Text + Audio)</h1>
+  <div id="log"></div>
+
+  <div class="row">
+    <input id="msg" type="text" placeholder="輸入訊息..." />
+    <button id="send">送出</button>
+    <button id="stop">停止</button>
+  </div>
+  <div class="row stt-row">
+    <label class="switch-wrap" for="sttToggle">
+      <input id="sttToggle" type="checkbox" />
+      <span id="sttToggleText" class="stt-toggle-text stt-off">STT 關閉</span>
+    </label>
+    <span id="sttStatus" class="meta">stt: off</span>
+  </div>
+
+  <div class="row">
+    <input id="llmBaseUrl" type="text" placeholder="LLM Base URL (optional, e.g. http://127.0.0.1:11434/v1)" />
+    <input id="llmModel" type="text" placeholder="LLM Model" style="max-width: 260px;" />
+  </div>
+  <div class="row">
+    <label for="ttsModel">TTS Model</label>
+    <select id="ttsModel">
+      <option value="kokoro" selected>kokoro</option>
+      <option value="piper">piper</option>
+      <option value="cosyvoice">cosyvoice</option>
+    </select>
+  </div>
+  <div class="row">
+    <input id="llmApiKey" type="password" placeholder="LLM API Key (optional)" />
+    <button id="applySettings">套用設定</button>
+  </div>
+
+  <div class="meta">Text Channel: <code>/api/chat/stream</code> | Audio Channel: <code>/api/voice/stream</code></div>
+  <div id="metric" class="meta">Ready</div>
+  <div class="status">
+    <span id="textStatus">text: idle</span>
+    <span id="audioStatus">audio: idle</span>
+    <span id="reqStatus">request_id: -</span>
+  </div>
+  <audio id="player" controls style="margin-top:12px; width:100%;"></audio>
+
+  <script>
+    const logEl = document.getElementById("log");
+    const msgEl = document.getElementById("msg");
+    const chatInputEl = document.getElementById("chat_input") || msgEl;
+    const sendEl = document.getElementById("send");
+    const stopEl = document.getElementById("stop");
+    const playerEl = document.getElementById("player");
+    const metricEl = document.getElementById("metric");
+    const textStatusEl = document.getElementById("textStatus");
+    const audioStatusEl = document.getElementById("audioStatus");
+    const reqStatusEl = document.getElementById("reqStatus");
+    const llmBaseUrlEl = document.getElementById("llmBaseUrl");
+    const llmModelEl = document.getElementById("llmModel");
+    const llmApiKeyEl = document.getElementById("llmApiKey");
+    const ttsModelEl = document.getElementById("ttsModel");
+    const applySettingsEl = document.getElementById("applySettings");
+    const sttToggleEl = document.getElementById("sttToggle");
+    const sttToggleTextEl = document.getElementById("sttToggleText");
+    const sttStatusEl = document.getElementById("sttStatus");
+
+    const state = { messages: [] };
+    const DEFAULT_LLM_MODEL = "qwen2.5:7b";
+    let ttsModel = "kokoro";
+    const TTS_VOICE_BY_MODEL = {
+      kokoro: "zf_001",
+      piper: "",
+      cosyvoice: "\u4e2d\u6587\u7537"
+    };
+    const STREAM_SAMPLE_RATE = 24000;
+    const STT_MODEL = "whisper-1";
+    const STT_LANGUAGE = "zh";
+    const STT_CHUNK_MS = 1500;
+    const STT_MIN_BLOB_BYTES = 1024;
+
+    function getTtsVoiceForModel(model) {
+      return TTS_VOICE_BY_MODEL[String(model || "").toLowerCase()] || "";
+    }
+
+    let audioCtx = null;
+    let playCursorSec = 0;
+    let active = null;
+    const sttState = {
+      enabled: false,
+      stream: null,
+      recorder: null,
+      mimeType: "",
+      analyser: null,
+      analyserBuffer: null,
+      micMonitorTimer: null,
+      micSource: null,
+      rotateTimer: null,
+      pendingChunks: [],
+      queue: [],
+      nextChunkId: 1,
+      chunkCount: 0,
+      isStarting: false,
+      isStopping: false,
+      isTranscribing: false,
+      abortController: null,
+      lastText: "",
+      lastTextAtMs: 0,
+      lastErrorAtMs: 0,
+      lastMicLogAtMs: 0,
+    };
+
+    function sttDebug(message, extra) {
+      if (extra !== undefined) console.log(`[stt] ${message}`, extra);
+      else console.log(`[stt] ${message}`);
+    }
+
+    function wsDebug(channel, message, extra) {
+      if (extra !== undefined) console.log(`[ws:${channel}] ${message}`, extra);
+      else console.log(`[ws:${channel}] ${message}`);
+    }
+
+    function setTextStatus(v) { textStatusEl.textContent = `text: ${v}`; }
+    function setAudioStatus(v) { audioStatusEl.textContent = `audio: ${v}`; }
+    function setReqStatus(v) { reqStatusEl.textContent = `request_id: ${v || "-"}`; }
+    function setSttStatus(v, isError = false) {
+      sttStatusEl.textContent = `stt: ${v}`;
+      if (isError) sttStatusEl.classList.add("err");
+      else sttStatusEl.classList.remove("err");
+    }
+    function setSttToggleUi(enabled) {
+      sttState.enabled = Boolean(enabled);
+      sttToggleEl.checked = sttState.enabled;
+      if (sttState.enabled) {
+        sttToggleTextEl.textContent = "STT 開啟";
+        sttToggleTextEl.classList.remove("stt-off");
+        sttToggleTextEl.classList.add("stt-on");
+      } else {
+        sttToggleTextEl.textContent = "STT 關閉";
+        sttToggleTextEl.classList.remove("stt-on");
+        sttToggleTextEl.classList.add("stt-off");
+      }
+    }
+
+    function getRuntimeConfig() {
+      const llmModel = String(llmModelEl.value || "").trim() || DEFAULT_LLM_MODEL;
+      const llmBaseUrl = String(llmBaseUrlEl.value || "").trim();
+      const llmApiKey = String(llmApiKeyEl.value || "");
+      return { llmModel, llmBaseUrl, llmApiKey };
+    }
+
+    function saveRuntimeConfig() {
+      const cfg = getRuntimeConfig();
+      localStorage.setItem("pipecat_llm_model", cfg.llmModel);
+      localStorage.setItem("pipecat_llm_base_url", cfg.llmBaseUrl);
+      localStorage.setItem("pipecat_llm_api_key", cfg.llmApiKey);
+    }
+
+    function loadRuntimeConfig() {
+      llmModelEl.value = localStorage.getItem("pipecat_llm_model") || DEFAULT_LLM_MODEL;
+      llmBaseUrlEl.value = localStorage.getItem("pipecat_llm_base_url") || "";
+      llmApiKeyEl.value = localStorage.getItem("pipecat_llm_api_key") || "";
+    }
+
+    function addLine(role, text, isError = false, cls = "") {
+      const visibleRoles = new Set(["user", "assistant"]);
+      if (!visibleRoles.has(String(role || "").toLowerCase())) {
+        return document.createElement("div");
+      }
+      const ts = new Date().toLocaleTimeString();
+      const line = document.createElement("div");
+      if (isError) line.classList.add("err");
+      if (cls) line.classList.add(cls);
+      line.textContent = `[${ts}] ${role}: ${text}`;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+      return line;
+    }
+
+    function updateAssistantLine(lineEl, text) {
+      const ts = new Date().toLocaleTimeString();
+      lineEl.textContent = `[${ts}] assistant: ${text}`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function uuid() {
+      if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+      return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`;
+    }
+
+    function getWsBase() {
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      return `${proto}//${window.location.host}`;
+    }
+
+    function ensureAudioContext() {
+      if (!audioCtx || audioCtx.state === "closed") {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) throw new Error("Web Audio API not supported");
+        audioCtx = new AC();
+        playCursorSec = 0;
+      }
+      return audioCtx;
+    }
+
+    async function unlockAudio() {
+      const ctx = ensureAudioContext();
+      if (ctx.state !== "running") await ctx.resume();
+    }
+
+    function pcm16ToFloat32(arrayBuffer) {
+      const pcm = new Int16Array(arrayBuffer);
+      const out = new Float32Array(pcm.length);
+      for (let i = 0; i < pcm.length; i += 1) out[i] = Math.max(-1, Math.min(1, pcm[i] / 32768));
+      return out;
+    }
+
+    function playPcmChunk(chunkBuffer, req) {
+      const ctx = ensureAudioContext();
+      const samples = pcm16ToFloat32(chunkBuffer);
+      if (!samples.length) return;
+
+      const audioBuf = ctx.createBuffer(1, samples.length, STREAM_SAMPLE_RATE);
+      audioBuf.copyToChannel(samples, 0, 0);
+
+      const src = ctx.createBufferSource();
+      src.buffer = audioBuf;
+      src.connect(ctx.destination);
+
+      const now = ctx.currentTime;
+      if (playCursorSec < now + 0.02) playCursorSec = now + 0.02;
+      const scheduledAtSec = playCursorSec;
+      src.start(playCursorSec);
+      playCursorSec += audioBuf.duration;
+
+      if (req && req.firstAudioPlayAtMs == null) {
+        const playbackDelayMs = Math.max(0, (scheduledAtSec - now) * 1000);
+        req.firstAudioPlayAtMs = performance.now() + playbackDelayMs;
+      }
+    }
+
+    async function callTtsFallback(text) {
+      const ttsVoice = getTtsVoiceForModel(ttsModel);
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, model: ttsModel, voice: ttsVoice })
+      });
+      if (!res.ok) throw new Error(`/api/tts failed (${res.status})`);
+      const blob = await res.blob();
+      const oldUrl = playerEl.dataset.url;
+      if (oldUrl) URL.revokeObjectURL(oldUrl);
+      const url = URL.createObjectURL(blob);
+      playerEl.dataset.url = url;
+      playerEl.src = url;
+      await playerEl.play();
+    }
+
+    function stopActiveStreams(manual = true) {
+      if (!active) return;
+      active.stopped = true;
+      try { active.textWs && active.textWs.close(1000, "stop"); } catch (_) {}
+      try { active.audioWs && active.audioWs.close(1000, "stop"); } catch (_) {}
+      if (manual) {
+        setTextStatus("stopped");
+        setAudioStatus("stopped");
+        metricEl.textContent = "Stopped";
+      }
+      active = null;
+    }
+
+    function pickMediaRecorderMimeType() {
+      if (!window.MediaRecorder || !window.MediaRecorder.isTypeSupported) return "";
+      const candidates = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/ogg;codecs=opus",
+        "audio/ogg",
+      ];
+      for (const candidate of candidates) {
+        if (window.MediaRecorder.isTypeSupported(candidate)) return candidate;
+      }
+      return "";
+    }
+
+    function extensionFromMimeType(mimeType) {
+      const m = String(mimeType || "").toLowerCase();
+      if (m.includes("webm")) return "webm";
+      if (m.includes("ogg")) return "ogg";
+      if (m.includes("wav")) return "wav";
+      if (m.includes("mp4") || m.includes("m4a")) return "m4a";
+      if (m.includes("mpeg") || m.includes("mp3")) return "mp3";
+      return "webm";
+    }
+
+    function stopMicLevelMonitor() {
+      if (sttState.micMonitorTimer) {
+        clearInterval(sttState.micMonitorTimer);
+        sttState.micMonitorTimer = null;
+      }
+      if (sttState.micSource) {
+        try { sttState.micSource.disconnect(); } catch (_) {}
+        sttState.micSource = null;
+      }
+      sttState.analyser = null;
+      sttState.analyserBuffer = null;
+      sttState.lastMicLogAtMs = 0;
+    }
+
+    function clearRecorderRotateTimer() {
+      if (sttState.rotateTimer) {
+        clearTimeout(sttState.rotateTimer);
+        sttState.rotateTimer = null;
+      }
+    }
+
+    function scheduleRecorderRotate() {
+      clearRecorderRotateTimer();
+      if (!sttState.enabled || !sttState.recorder || sttState.recorder.state !== "recording") return;
+      sttState.rotateTimer = window.setTimeout(() => {
+        const recorder = sttState.recorder;
+        if (!sttState.enabled || !recorder || recorder.state !== "recording") return;
+        sttDebug("rotating recorder chunk", { chunkMs: STT_CHUNK_MS });
+        try {
+          recorder.stop();
+        } catch (err) {
+          console.error("[stt] recorder stop during rotate failed", err);
+        }
+      }, STT_CHUNK_MS);
+    }
+
+    function buildChunkBlob() {
+      if (!sttState.pendingChunks.length) return null;
+      const blob = new Blob(sttState.pendingChunks, { type: sttState.mimeType || "audio/webm" });
+      sttState.pendingChunks = [];
+      return blob;
+    }
+
+    function startMicLevelMonitor(stream) {
+      stopMicLevelMonitor();
+      try {
+        const ctx = ensureAudioContext();
+        const source = ctx.createMediaStreamSource(stream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 2048;
+        analyser.smoothingTimeConstant = 0.15;
+        const buffer = new Float32Array(analyser.fftSize);
+        source.connect(analyser);
+
+        sttState.micSource = source;
+        sttState.analyser = analyser;
+        sttState.analyserBuffer = buffer;
+
+        sttState.micMonitorTimer = window.setInterval(() => {
+          if (!sttState.enabled || !sttState.analyser || !sttState.analyserBuffer) return;
+          sttState.analyser.getFloatTimeDomainData(sttState.analyserBuffer);
+          let sumSq = 0;
+          let peak = 0;
+          for (let i = 0; i < sttState.analyserBuffer.length; i += 1) {
+            const sample = sttState.analyserBuffer[i];
+            sumSq += sample * sample;
+            const abs = Math.abs(sample);
+            if (abs > peak) peak = abs;
+          }
+          const rms = Math.sqrt(sumSq / sttState.analyserBuffer.length);
+          const nowMs = performance.now();
+          if (nowMs - sttState.lastMicLogAtMs >= 1000) {
+            sttState.lastMicLogAtMs = nowMs;
+            sttDebug("microphone level", {
+              rms: Number(rms.toFixed(5)),
+              peak: Number(peak.toFixed(5)),
+              active: rms > 0.01 || peak > 0.05,
+            });
+          }
+        }, 250);
+      } catch (err) {
+        console.error("[stt] mic monitor init failed", err);
+        sttDebug("mic monitor init failed", { error: err?.message || String(err) });
+      }
+    }
+
+    function appendSttTextToInput(text) {
+      const next = String(text || "").trim();
+      if (!next) return;
+      const current = String(chatInputEl.value || "").trim();
+      if (!current) {
+        chatInputEl.value = next;
+        sttDebug("UI update", { mode: "replace", text: next });
+        addLine("stt-ui", `input updated: ${next}`);
+        return;
+      }
+      if (current.includes(next)) return;
+      chatInputEl.value = `${current} ${next}`.trim();
+      sttDebug("UI update", { mode: "append", text: next, value: chatInputEl.value });
+      addLine("stt-ui", `input appended: ${next}`);
+    }
+
+    function isLikelyDuplicateSttText(text) {
+      const next = String(text || "").trim();
+      if (!next) return true;
+      const nowMs = performance.now();
+      if (next === sttState.lastText && nowMs - sttState.lastTextAtMs < 2000) return true;
+      sttState.lastText = next;
+      sttState.lastTextAtMs = nowMs;
+      return false;
+    }
+
+    async function transcribeChunkWithStt(item) {
+      const blob = item?.blob;
+      const mimeType = String(blob?.type || sttState.mimeType || "").toLowerCase();
+      const ext = extensionFromMimeType(mimeType);
+      const uploadBlob = mimeType && blob.type !== mimeType
+        ? new Blob([blob], { type: mimeType })
+        : blob;
+      console.log("blob size", uploadBlob?.size || 0);
+      console.log("blob type", uploadBlob?.type || mimeType || "");
+      const form = new FormData();
+      form.append("file", uploadBlob, `stt-${Date.now()}.${ext}`);
+      form.append("model", STT_MODEL);
+      form.append("language", STT_LANGUAGE);
+      form.append("response_format", "json");
+
+      const controller = new AbortController();
+      sttState.abortController = controller;
+      const startedAtMs = performance.now();
+      console.log("audio chunk sending");
+      sttDebug("audio chunk sending", {
+        chunkId: item?.id,
+        size: uploadBlob?.size || 0,
+        type: mimeType || "(empty)",
+        formData: {
+          file: `stt-${Date.now()}.${ext}`,
+          model: STT_MODEL,
+          language: STT_LANGUAGE,
+          response_format: "json",
+        },
+      });
+      addLine("stt-send", `chunk #${item?.id || "?"} sending (${uploadBlob?.size || 0} bytes, ${mimeType || "unknown"})`);
+      try {
+        const res = await fetch("/api/stt/transcriptions", {
+          method: "POST",
+          body: form,
+          signal: controller.signal,
+        });
+
+        let payload = null;
+        const contentType = String(res.headers.get("Content-Type") || "").toLowerCase();
+        const rawText = await res.text();
+        sttDebug("STT raw response", {
+          chunkId: item?.id,
+          status: res.status,
+          contentType,
+          latencyMs: Math.round(performance.now() - startedAtMs),
+          debugId: res.headers.get("X-STT-Debug-Id") || "",
+          body: rawText,
+        });
+        if (contentType.includes("application/json")) {
+          try {
+            payload = JSON.parse(rawText);
+          } catch (err) {
+            sttDebug("STT response JSON parse failed", { chunkId: item?.id, error: String(err) });
+            payload = { text: "" };
+          }
+        } else {
+          payload = { text: rawText };
+        }
+
+        if (!res.ok) {
+          const detail = payload && (payload.detail || payload.error || payload.message);
+          throw new Error(detail || `STT request failed (${res.status})`);
+        }
+
+        const text = String((payload && payload.text) || "").trim();
+        console.log("STT result received");
+        sttDebug("STT result received", {
+          chunkId: item?.id,
+          status: res.status,
+          latencyMs: Math.round(performance.now() - startedAtMs),
+          debugId: res.headers.get("X-STT-Debug-Id") || "",
+          text,
+          payload,
+        });
+        addLine("stt-result", `chunk #${item?.id || "?"} received: ${text || "(empty)"}`);
+        return text;
+      } finally {
+        if (sttState.abortController === controller) sttState.abortController = null;
+      }
+    }
+
+    async function pumpSttQueue() {
+      if (!sttState.enabled || sttState.isTranscribing) return;
+      const item = sttState.queue.shift();
+      if (!item) return;
+      sttState.isTranscribing = true;
+      try {
+        const text = await transcribeChunkWithStt(item);
+        if (text && !isLikelyDuplicateSttText(text)) {
+          appendSttTextToInput(text);
+          setSttStatus("listening");
+        }
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+        const nowMs = performance.now();
+        const detail = err && err.message ? err.message : String(err);
+        console.error("[stt] transcription failed:", detail);
+        setSttStatus("error", true);
+        if (nowMs - sttState.lastErrorAtMs > 3000) {
+          addLine("stt", "STT 暫時無法辨識音訊，請再試一次", true);
+          sttState.lastErrorAtMs = nowMs;
+        }
+      } finally {
+        sttState.isTranscribing = false;
+        if (sttState.enabled && sttState.queue.length) pumpSttQueue();
+      }
+    }
+
+    function enqueueSttChunk(blob) {
+      if (!sttState.enabled || !blob || !blob.size) return;
+      sttState.chunkCount += 1;
+      console.log("blob size", blob.size);
+      console.log("blob type", blob.type || sttState.mimeType || "");
+      if (blob.size < STT_MIN_BLOB_BYTES) {
+        sttDebug("chunk skipped: too small", {
+          chunkCount: sttState.chunkCount,
+          size: blob.size,
+          minBytes: STT_MIN_BLOB_BYTES,
+        });
+        addLine("stt-chunk", `chunk skipped: too small (${blob.size} bytes)`);
+        return;
+      }
+      const item = {
+        id: sttState.nextChunkId++,
+        blob,
+        createdAtMs: performance.now(),
+      };
+      sttState.queue.push(item);
+      if (sttState.queue.length > 8) sttState.queue.shift();
+      sttDebug("recording chunk captured", {
+        chunkId: item.id,
+        chunkCount: sttState.chunkCount,
+        size: blob.size,
+        type: blob.type || sttState.mimeType || "(empty)",
+        queueLength: sttState.queue.length,
+      });
+      addLine("stt-chunk", `chunk #${item.id} captured (${blob.size} bytes)`);
+      pumpSttQueue();
+    }
+
+    async function startSttCapture() {
+      if (sttState.isStarting || sttState.isStopping) return;
+      if (sttState.recorder && sttState.recorder.state !== "inactive") return;
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setSttToggleUi(false);
+        setSttStatus("browser not supported", true);
+        addLine("stt", "Browser 不支援麥克風存取 API", true);
+        return;
+      }
+
+      sttState.isStarting = true;
+      setSttStatus("starting");
+      try {
+        sttDebug("requesting microphone access");
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        sttDebug("microphone permission granted", {
+          tracks: stream.getAudioTracks().map((track) => ({
+            label: track.label,
+            enabled: track.enabled,
+            muted: track.muted,
+            readyState: track.readyState,
+          })),
+        });
+        await unlockAudio();
+        startMicLevelMonitor(stream);
+        const mimeType = pickMediaRecorderMimeType();
+        const recorder = mimeType
+          ? new MediaRecorder(stream, { mimeType })
+          : new MediaRecorder(stream);
+
+        recorder.ondataavailable = (evt) => {
+          if (!evt.data || !evt.data.size) return;
+          sttDebug("recorder dataavailable", {
+            size: evt.data.size,
+            type: evt.data.type || recorder.mimeType || mimeType || "",
+          });
+          sttState.pendingChunks.push(evt.data);
+        };
+        recorder.onstart = () => {
+          console.log("STT mic started");
+          sttDebug("media recorder started", {
+            state: recorder.state,
+            mimeType: recorder.mimeType || mimeType || "",
+            chunkMs: STT_CHUNK_MS,
+          });
+          addLine("stt-mic", "STT mic started");
+          scheduleRecorderRotate();
+        };
+        recorder.onerror = (evt) => {
+          console.error("[stt] recorder error", evt.error);
+          setSttStatus("recorder error", true);
+          addLine("stt", `錄音錯誤: ${evt.error?.message || "unknown"}`, true);
+        };
+        recorder.onstop = () => {
+          const blob = buildChunkBlob();
+          sttDebug("media recorder stopped", {
+            enabled: sttState.enabled,
+            blobSize: blob?.size || 0,
+            mimeType: blob?.type || sttState.mimeType || "",
+          });
+          if (blob && blob.size) enqueueSttChunk(blob);
+          if (sttState.enabled && sttState.stream) {
+            try {
+              recorder.start();
+            } catch (err) {
+              console.error("[stt] recorder restart failed", err);
+              setSttStatus("recorder restart failed", true);
+              addLine("stt", `錄音重啟失敗: ${err.message || String(err)}`, true);
+            }
+            return;
+          }
+          if (!sttState.enabled) setSttStatus("off");
+        };
+
+        sttState.stream = stream;
+        sttState.recorder = recorder;
+        sttState.mimeType = recorder.mimeType || mimeType || "";
+        sttState.pendingChunks = [];
+        sttState.queue = [];
+        sttState.nextChunkId = 1;
+        sttState.chunkCount = 0;
+        sttState.lastText = "";
+        sttState.lastTextAtMs = 0;
+        sttState.lastErrorAtMs = 0;
+        setSttToggleUi(true);
+        recorder.start();
+        setSttStatus("listening");
+        addLine("stt", "STT 開啟，開始收音");
+      } catch (err) {
+        console.error("[stt] getUserMedia failed", err);
+        setSttToggleUi(false);
+        setSttStatus("permission denied", true);
+        addLine("stt", `無法啟用麥克風: ${err.message || String(err)}`, true);
+      } finally {
+        sttState.isStarting = false;
+      }
+    }
+
+    async function stopSttCapture(showLog = true) {
+      if (sttState.isStopping) return;
+      sttState.isStopping = true;
+      setSttToggleUi(false);
+
+      try {
+        if (sttState.abortController) {
+          try { sttState.abortController.abort(); } catch (_) {}
+          sttState.abortController = null;
+        }
+        clearRecorderRotateTimer();
+        sttState.pendingChunks = [];
+        sttState.queue = [];
+        stopMicLevelMonitor();
+
+        const recorder = sttState.recorder;
+        sttState.recorder = null;
+        if (recorder && recorder.state !== "inactive") {
+          try { recorder.stop(); } catch (_) {}
+        }
+
+        const stream = sttState.stream;
+        sttState.stream = null;
+        sttState.mimeType = "";
+        if (stream) {
+          for (const track of stream.getTracks()) {
+            try { track.stop(); } catch (_) {}
+          }
+        }
+
+        setSttStatus("off");
+        if (showLog) addLine("stt", "STT 關閉，已停止收音與傳輸");
+      } finally {
+        sttState.isStopping = false;
+      }
+    }
+
+    function startTextChannel(req) {
+      return new Promise((resolve, reject) => {
+        const wsUrl = `${getWsBase()}/api/chat/stream?request_id=${encodeURIComponent(req.id)}`;
+        const ws = new WebSocket(wsUrl);
+        req.textWs = ws;
+        req.assistantText = "";
+        wsDebug("text", "connecting", { requestId: req.id, wsUrl });
+
+        ws.onopen = () => {
+          setTextStatus("streaming");
+          const payload = {
+            request_id: req.id,
+            model: req.llmModel,
+            llm_base_url: req.llmBaseUrl || undefined,
+            llm_api_key: req.llmApiKey || undefined,
+            messages: req.messages
+          };
+          wsDebug("text", "open");
+          wsDebug("text", "send", payload);
+          ws.send(JSON.stringify(payload));
+        };
+
+        ws.onerror = (evt) => {
+          wsDebug("text", "error", evt);
+          if (!req.textDone && !req.stopped) reject(new Error("text websocket error"));
+        };
+
+        ws.onmessage = (evt) => {
+          let payload;
+          try { payload = JSON.parse(evt.data); } catch (_) { return; }
+          if (!payload || payload.request_id !== req.id) return;
+
+          if (payload.event === "delta") {
+            wsDebug("text", "recv delta", {
+              requestId: payload.request_id,
+              chars: String(payload.delta || "").length,
+            });
+            req.assistantText += String(payload.delta || "");
+            updateAssistantLine(req.assistantLine, req.assistantText);
+            if (req.firstTextShownAtMs == null) {
+              req.firstTextShownAtMs = performance.now();
+            }
+            return;
+          }
+          if (payload.event === "error") {
+            wsDebug("text", "recv error", payload);
+            setTextStatus("error");
+            reject(new Error(payload.error || "text stream error"));
+            return;
+          }
+          if (payload.event === "done") {
+            wsDebug("text", "recv done", {
+              requestId: payload.request_id,
+              chars: String(payload.text || req.assistantText || "").length,
+            });
+            req.textDone = true;
+            req.assistantText = String(payload.text || req.assistantText || "");
+            updateAssistantLine(req.assistantLine, req.assistantText);
+            setTextStatus("done");
+            resolve(req.assistantText);
+          }
+        };
+
+        ws.onclose = () => {
+          wsDebug("text", "close", { requestId: req.id, readyState: ws.readyState });
+          if (!req.textDone && !req.stopped) {
+            setTextStatus("closed");
+            reject(new Error("text websocket closed early"));
+          }
+        };
+      });
+    }
+
+    function startAudioChannel(req) {
+      return new Promise(async (resolve, reject) => {
+        await unlockAudio();
+        const ttsVoice = getTtsVoiceForModel(ttsModel);
+        const wsUrl = `${getWsBase()}/api/voice/stream?request_id=${encodeURIComponent(req.id)}&model=${encodeURIComponent(req.llmModel)}&tts_model=${encodeURIComponent(ttsModel)}&voice=${encodeURIComponent(ttsVoice)}&language=Chinese`;
+        const ws = new WebSocket(wsUrl);
+        ws.binaryType = "arraybuffer";
+        req.audioWs = ws;
+        req.audioDone = false;
+        wsDebug("audio", "connecting", { requestId: req.id, wsUrl });
+
+        ws.onopen = () => {
+          setAudioStatus("streaming");
+          const payload = {
+            request_id: req.id,
+            model: req.llmModel,
+            tts_model: ttsModel,
+            voice: ttsVoice
+          };
+          wsDebug("audio", "open");
+          wsDebug("audio", "send", payload);
+          ws.send(JSON.stringify(payload));
+        };
+
+        ws.onerror = (evt) => {
+          wsDebug("audio", "error", evt);
+          if (!req.audioDone && !req.stopped) reject(new Error("audio websocket error"));
+        };
+
+        ws.onmessage = (evt) => {
+          if (typeof evt.data === "string") {
+            let payload;
+            try { payload = JSON.parse(evt.data); } catch (_) { return; }
+            if (payload.request_id && payload.request_id !== req.id) return;
+            if (payload.error) {
+              wsDebug("audio", "recv error", payload);
+              setAudioStatus("error");
+              reject(new Error(String(payload.error)));
+              return;
+            }
+            if (payload.event === "done") {
+              wsDebug("audio", "recv done", payload);
+              req.audioDone = true;
+              setAudioStatus("done");
+              resolve();
+            }
+            return;
+          }
+
+          const consume = (buf) => {
+            if (!(buf instanceof ArrayBuffer) || buf.byteLength === 0) return;
+            req.audioBytes += buf.byteLength;
+            wsDebug("audio", "recv binary", {
+              requestId: req.id,
+              bytes: buf.byteLength,
+              totalBytes: req.audioBytes,
+            });
+            playPcmChunk(buf, req);
+          };
+
+          if (evt.data instanceof ArrayBuffer) consume(evt.data);
+          else if (evt.data instanceof Blob) evt.data.arrayBuffer().then(consume).catch(reject);
+        };
+
+        ws.onclose = () => {
+          wsDebug("audio", "close", { requestId: req.id, readyState: ws.readyState });
+          if (!req.audioDone && !req.stopped) {
+            setAudioStatus("closed");
+            reject(new Error("audio websocket closed early"));
+          }
+        };
+      });
+    }
+
+    async function onSend() {
+      const text = msgEl.value.trim();
+      if (!text) return;
+
+      stopActiveStreams(false);
+      msgEl.value = "";
+      sendEl.disabled = true;
+      msgEl.disabled = true;
+
+      const requestId = uuid();
+      const cfg = getRuntimeConfig();
+      saveRuntimeConfig();
+
+      const req = {
+        id: requestId,
+        userText: text,
+        llmModel: cfg.llmModel,
+        llmBaseUrl: cfg.llmBaseUrl,
+        llmApiKey: cfg.llmApiKey,
+        startedAtMs: performance.now(),
+        stopped: false,
+        textDone: false,
+        audioDone: false,
+        assistantText: "",
+        firstTextShownAtMs: null,
+        firstAudioPlayAtMs: null,
+        audioBytes: 0,
+        textWs: null,
+        audioWs: null,
+        assistantLine: null,
+        messages: [],
+      };
+      active = req;
+
+      try {
+        setReqStatus(requestId);
+        state.messages.push({ role: "user", content: text });
+        addLine("user", text, false);
+        req.assistantLine = addLine("assistant", "思考中...", false, "assistant-line");
+        req.messages = state.messages.map((m) => ({ role: m.role, content: m.content }));
+
+        metricEl.textContent = "Text+Audio dual channel streaming...";
+        const textPromise = startTextChannel(req).catch((err) => {
+          setTextStatus("error");
+          addLine("text", err.message || String(err), true);
+          return "";
+        });
+
+        const audioPromise = startAudioChannel(req).catch(async (err) => {
+          setAudioStatus("error");
+          addLine("audio", err.message || String(err), true);
+          return err;
+        });
+
+        const [textResult, audioResult] = await Promise.allSettled([textPromise, audioPromise]);
+        const finalText = textResult.status === "fulfilled" ? String(textResult.value || "") : "";
+        if (finalText) {
+          state.messages.push({ role: "assistant", content: finalText });
+        }
+
+        const audioFailed = audioResult.status === "fulfilled" && audioResult.value instanceof Error;
+        if (audioFailed && finalText && !req.stopped) {
+          metricEl.textContent = "Audio WS failed, fallback /api/tts...";
+          try {
+            await callTtsFallback(finalText);
+            setAudioStatus("http-fallback-done");
+          } catch (fallbackErr) {
+            addLine("audio-fallback", fallbackErr.message || String(fallbackErr), true);
+          }
+        }
+
+        const textFirstMs = req.firstTextShownAtMs == null ? null : Math.max(0, Math.round(req.firstTextShownAtMs - req.startedAtMs));
+        const audioFirstMs = req.firstAudioPlayAtMs == null ? null : Math.max(0, Math.round(req.firstAudioPlayAtMs - req.startedAtMs));
+        const textToAudioMs = (req.firstTextShownAtMs != null && req.firstAudioPlayAtMs != null)
+          ? Math.max(0, Math.round(req.firstAudioPlayAtMs - req.firstTextShownAtMs))
+          : null;
+
+        metricEl.textContent = `Streaming done: first text ${textFirstMs == null ? "-" : `${textFirstMs} ms`}, first audio ${audioFirstMs == null ? "-" : `${audioFirstMs} ms`}, text->audio ${textToAudioMs == null ? "-" : `${textToAudioMs} ms`}, bytes ${req.audioBytes}`;
+      } catch (err) {
+        addLine("error", err.message || String(err), true);
+        metricEl.textContent = "Error";
+      } finally {
+        if (active && active.id === requestId) active = null;
+        sendEl.disabled = false;
+        msgEl.disabled = false;
+        msgEl.focus();
+      }
+    }
+
+    sendEl.addEventListener("click", onSend);
+    applySettingsEl.addEventListener("click", () => {
+      saveRuntimeConfig();
+      metricEl.textContent = "設定已套用";
+    });
+    stopEl.addEventListener("click", () => stopActiveStreams(true));
+    sttToggleEl.addEventListener("change", async () => {
+      if (sttToggleEl.checked) await startSttCapture();
+      else await stopSttCapture(true);
+    });
+    msgEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") onSend();
+    });
+    window.addEventListener("beforeunload", () => {
+      stopSttCapture(false);
+    });
+
+    setSttToggleUi(false);
+    setSttStatus("off");
+    ttsModel = String(ttsModelEl.value || "kokoro").toLowerCase();
+    ttsModelEl.addEventListener("change", () => {
+      ttsModel = String(ttsModelEl.value || "kokoro").toLowerCase();
+    });
+    loadRuntimeConfig();
+    msgEl.focus();
+  </script>
+</body>
+</html>

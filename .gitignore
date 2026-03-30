@@ -1,0 +1,79 @@
+# Python cache / build artifacts
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Local editor / OS files
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Git metadata from nested repos
+.git/
+voice/.git/
+voice/.git_backup_local/
+
+# Environment / secrets
+.env
+.env.*
+!.env.sample
+!.env.example
+stack.env
+*.key
+*.pem
+*.p12
+*.token
+secrets.*
+
+# Logs / runtime temp
+*.log
+logs/
+tmp/
+temp/
+
+# Audio / generated outputs
+outputs/
+voice/recordings/
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.aac
+*.ogg
+*.bin
+
+# Project data / datasets / model caches
+voice/services/stt-service/data/
+voice/services/tts-service/data/
+voice/services/tts-service/finetuning-asr/toy_dataset/
+voice/Sound_training_test/.model_cache/
+
+# Optional research / experiment folders not committed by default
+voice/sts_test/
+voice/tts_benchmark/
+voice/Sound_training_test/
+voice/services/tts-service/vllm_plugin/tests/
+voice/tool/
+voice/ui_tts_export/
+voice/services/tts-service/demo/
+voice/sts_report/
+UPDATE_LOG/
+
+# Large model artifacts
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.zip
+*.tar
+*.gz
